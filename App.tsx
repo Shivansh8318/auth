@@ -1,130 +1,349 @@
-/**
- * Sample React Native App
- * https://github.com/facebook/react-native
- *
- * @format
- */
-
-import React from 'react';
-import type {PropsWithChildren} from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  useColorScheme,
   View,
+  Text,
+  TextInput,
+  Button,
+  StyleSheet,
+  Alert,
+  Platform,
+  TouchableOpacity,
 } from 'react-native';
+import { OtplessHeadlessModule } from 'otpless-headless-rn';
 
-import {
-  Colors,
-  DebugInstructions,
-  Header,
-  LearnMoreLinks,
-  ReloadInstructions,
-} from 'react-native/Libraries/NewAppScreen';
-
-type SectionProps = PropsWithChildren<{
-  title: string;
-}>;
-
-function Section({children, title}: SectionProps): React.JSX.Element {
-  const isDarkMode = useColorScheme() === 'dark';
-  return (
-    <View style={styles.sectionContainer}>
-      <Text
-        style={[
-          styles.sectionTitle,
-          {
-            color: isDarkMode ? Colors.white : Colors.black,
-          },
-        ]}>
-        {title}
-      </Text>
-      <Text
-        style={[
-          styles.sectionDescription,
-          {
-            color: isDarkMode ? Colors.light : Colors.dark,
-          },
-        ]}>
-        {children}
-      </Text>
-    </View>
-  );
+// Define types for OTPLESS response
+interface OtplessResponse {
+  responseType: string;
+  statusCode?: number;
+  response: {
+    authType?: string;
+    otp?: string;
+    token?: string;
+    errorMessage?: string;
+    deliveryChannel?: string;
+  };
 }
 
-function App(): React.JSX.Element {
-  const isDarkMode = useColorScheme() === 'dark';
+const App: React.FC = () => {
+  const headlessModule = new OtplessHeadlessModule();
+  const [authMethod, setAuthMethod] = useState<string | null>(null); // phone, email, or oauth channel (GMAIL, WHATSAPP, APPLE)
+  const [phoneNumber, setPhoneNumber] = useState<string>('');
+  const [countryCode, setCountryCode] = useState<string>('+91');
+  const [email, setEmail] = useState<string>('');
+  const [otp, setOtp] = useState<string>('');
+  const [isOtpSent, setIsOtpSent] = useState<boolean>(false);
 
-  const backgroundStyle = {
-    backgroundColor: isDarkMode ? Colors.darker : Colors.lighter,
+  // Initialize OTPLESS SDK and set up cleanup
+  useEffect(() => {
+    headlessModule.initialize('9DRP3BQPAKLIZYTVT2JS');
+    headlessModule.setResponseCallback(onHeadlessResult);
+    return () => {
+      headlessModule.clearListener();
+      headlessModule.cleanup();
+    };
+  }, []);
+
+  // Start phone authentication
+  const startPhoneAuth = () => {
+    if (!phoneNumber || !countryCode) {
+      Alert.alert('Error', 'Please enter phone number and country code');
+      return;
+    }
+    const request = {
+      phone: phoneNumber,
+      countryCode,
+    };
+    headlessModule.start(request);
   };
 
-  /*
-   * To keep the template simple and small we're adding padding to prevent view
-   * from rendering under the System UI.
-   * For bigger apps the recommendation is to use `react-native-safe-area-context`:
-   * https://github.com/AppAndFlow/react-native-safe-area-context
-   *
-   * You can read more about it here:
-   * https://github.com/react-native-community/discussions-and-proposals/discussions/827
-   */
-  const safePadding = '5%';
+  // Start email authentication
+  const startEmailAuth = () => {
+    if (!email) {
+      Alert.alert('Error', 'Please enter email address');
+      return;
+    }
+    const request = {
+      email,
+    };
+    headlessModule.start(request);
+  };
+
+  // Start OAuth authentication
+  const startOAuth = (channel: string) => {
+    const request = { channelType: channel };
+    headlessModule.start(request);
+  };
+
+  // Verify OTP (for phone or email)
+  const verifyOtp = () => {
+    if (!otp) {
+      Alert.alert('Error', 'Please enter the OTP');
+      return;
+    }
+    const request =
+      authMethod === 'phone'
+        ? {
+            phone: phoneNumber,
+            countryCode,
+            otp,
+          }
+        : {
+            email,
+            otp,
+          };
+    headlessModule.start(request);
+  };
+
+  // Handle headless SDK responses
+  const onHeadlessResult = (result: OtplessResponse) => {
+    headlessModule.commitResponse(result);
+    const responseType = result.responseType;
+
+    switch (responseType) {
+      case 'SDK_READY':
+        console.log('SDK is ready');
+        break;
+      case 'FAILED':
+        console.log('SDK initialization failed');
+        Alert.alert('Error', 'SDK initialization failed');
+        break;
+      case 'INITIATE':
+        if (result.statusCode === 200) {
+          console.log('Headless authentication initiated');
+          const authType = result.response.authType;
+          if (authType === 'OTP') {
+            setIsOtpSent(true);
+            Alert.alert(
+              'Success',
+              `OTP sent to your ${authMethod === 'email' ? 'email' : 'phone number'}`
+            );
+          } else {
+            Alert.alert('Info', `Initiated ${authType} authentication`);
+          }
+        } else {
+          const errorMessage =
+            Platform.OS === 'ios'
+              ? handleInitiateErrorIOS(result.response)
+              : handleInitiateErrorAndroid(result.response);
+          Alert.alert('Error', errorMessage || 'Failed to initiate authentication');
+        }
+        break;
+      case 'OTP_AUTO_READ':
+        if (Platform.OS === 'android' && authMethod === 'phone') {
+          const receivedOtp = result.response.otp;
+          console.log(`OTP Received: ${receivedOtp}`);
+          setOtp(receivedOtp || '');
+          if (receivedOtp) verifyOtp();
+        }
+        break;
+      case 'VERIFY':
+        if (result.statusCode === 200) {
+          const token = result.response.token;
+          if (token) {
+            console.log(`Token: ${token}`);
+            Alert.alert('Success', `Login successful! Token: ${token}`);
+            resetForm();
+          }
+        } else {
+          const errorMessage =
+            Platform.OS === 'ios'
+              ? handleVerifyErrorIOS(result.response)
+              : handleVerifyErrorAndroid(result.response);
+          Alert.alert('Error', errorMessage || 'OTP verification failed');
+        }
+        break;
+      case 'DELIVERY_STATUS':
+        const authType = result.response.authType;
+        const deliveryChannel = result.response.deliveryChannel;
+        console.log(`Delivery Status: ${authType} via ${deliveryChannel}`);
+        break;
+      case 'ONETAP':
+        const token = result.response.token;
+        if (token) {
+          console.log(`OneTap Token: ${token}`);
+          Alert.alert('Success', `Login successful! Token: ${token}`);
+          resetForm();
+        }
+        break;
+      case 'FALLBACK_TRIGGERED':
+        const newDeliveryChannel = result.response.deliveryChannel;
+        if (newDeliveryChannel) {
+          Alert.alert('Info', `OTP sent via ${newDeliveryChannel}`);
+        }
+        break;
+      default:
+        console.warn(`Unknown response type: ${responseType}`);
+        break;
+    }
+  };
+
+  // Reset form after successful login or when going back
+  const resetForm = () => {
+    setIsOtpSent(false);
+    setPhoneNumber('');
+    setCountryCode('+91');
+    setEmail('');
+    setOtp('');
+    setAuthMethod(null);
+  };
+
+  // Error handling for Android
+  const handleInitiateErrorAndroid = (response: { errorMessage?: string }): string => {
+    return response.errorMessage || 'Initiation error';
+  };
+
+  const handleVerifyErrorAndroid = (response: { errorMessage?: string }): string => {
+    return response.errorMessage || 'Verification error';
+  };
+
+  // Error handling for iOS
+  const handleInitiateErrorIOS = (response: { errorMessage?: string }): string => {
+    return response.errorMessage || 'Initiation error';
+  };
+
+  const handleVerifyErrorIOS = (response: { errorMessage?: string }): string => {
+    return response.errorMessage || 'Verification error';
+  };
 
   return (
-    <View style={backgroundStyle}>
-      <StatusBar
-        barStyle={isDarkMode ? 'light-content' : 'dark-content'}
-        backgroundColor={backgroundStyle.backgroundColor}
-      />
-      <ScrollView
-        style={backgroundStyle}>
-        <View style={{paddingRight: safePadding}}>
-          <Header/>
-        </View>
-        <View
-          style={{
-            backgroundColor: isDarkMode ? Colors.black : Colors.white,
-            paddingHorizontal: safePadding,
-            paddingBottom: safePadding,
-          }}>
-          <Section title="Step One">
-            Edit <Text style={styles.highlight}>App.tsx</Text> to change this
-            screen and then come back to see your edits.
-          </Section>
-          <Section title="See Your Changes">
-            <ReloadInstructions />
-          </Section>
-          <Section title="Debug">
-            <DebugInstructions />
-          </Section>
-          <Section title="Learn More">
-            Read the docs to discover what to do next:
-          </Section>
-          <LearnMoreLinks />
-        </View>
-      </ScrollView>
+    <View style={styles.container}>
+      <Text style={styles.title}>UrbanBook Login</Text>
+
+      {!authMethod && (
+        <>
+          <TouchableOpacity
+            style={styles.authButton}
+            onPress={() => setAuthMethod('phone')}
+          >
+            <Text style={styles.authButtonText}>Login with Phone</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.authButton}
+            onPress={() => setAuthMethod('email')}
+          >
+            <Text style={styles.authButtonText}>Login with Email</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.authButton}
+            onPress={() => {
+              setAuthMethod('GMAIL');
+              startOAuth('GMAIL');
+            }}
+          >
+            <Text style={styles.authButtonText}>Sign in with Gmail</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.authButton}
+            onPress={() => {
+              setAuthMethod('WHATSAPP');
+              startOAuth('WHATSAPP');
+            }}
+          >
+            <Text style={styles.authButtonText}>Sign in with WhatsApp</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.authButton}
+            onPress={() => {
+              setAuthMethod('APPLE');
+              startOAuth('APPLE');
+            }}
+          >
+            <Text style={styles.authButtonText}>Sign in with Apple</Text>
+          </TouchableOpacity>
+        </>
+      )}
+
+      {authMethod === 'phone' && !isOtpSent && (
+        <>
+          <TextInput
+            style={styles.input}
+            placeholder="Country Code (e.g., +91)"
+            value={countryCode}
+            onChangeText={setCountryCode}
+            keyboardType="phone-pad"
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="Phone Number"
+            value={phoneNumber}
+            onChangeText={setPhoneNumber}
+            keyboardType="phone-pad"
+          />
+          <Button title="Send OTP" onPress={startPhoneAuth} />
+          <Button title="Back" onPress={resetForm} color="gray" />
+        </>
+      )}
+
+      {authMethod === 'email' && !isOtpSent && (
+        <>
+          <TextInput
+            style={styles.input}
+            placeholder="Email Address"
+            value={email}
+            onChangeText={setEmail}
+            keyboardType="email-address"
+            autoCapitalize="none"
+          />
+          <Button title="Send OTP" onPress={startEmailAuth} />
+          <Button title="Back" onPress={resetForm} color="gray" />
+        </>
+      )}
+
+      {isOtpSent && (authMethod === 'phone' || authMethod === 'email') && (
+        <>
+          <TextInput
+            style={styles.input}
+            placeholder="Enter OTP"
+            value={otp}
+            onChangeText={setOtp}
+            keyboardType="numeric"
+          />
+          <Button title="Verify OTP" onPress={verifyOtp} />
+          <Button
+            title="Back"
+            onPress={() => {
+              setIsOtpSent(false);
+              setOtp('');
+            }}
+            color="gray"
+          />
+        </>
+      )}
     </View>
   );
-}
+};
 
 const styles = StyleSheet.create({
-  sectionContainer: {
-    marginTop: 32,
-    paddingHorizontal: 24,
+  container: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
   },
-  sectionTitle: {
+  title: {
     fontSize: 24,
-    fontWeight: '600',
+    marginBottom: 20,
   },
-  sectionDescription: {
-    marginTop: 8,
-    fontSize: 18,
-    fontWeight: '400',
+  input: {
+    width: '100%',
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#ccc',
+    borderRadius: 5,
+    marginBottom: 10,
   },
-  highlight: {
-    fontWeight: '700',
+  authButton: {
+    width: '100%',
+    padding: 15,
+    backgroundColor: '#007AFF',
+    borderRadius: 5,
+    marginBottom: 10,
+    alignItems: 'center',
+  },
+  authButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
   },
 });
 
