@@ -19,22 +19,25 @@ interface OtplessResponse {
     authType?: string;
     otp?: string;
     token?: string;
+    idToken?: string; // Added for potential alternative token field
+    errorCode?: string;
     errorMessage?: string;
     deliveryChannel?: string;
+    data?: { token?: string }; // Added for nested token possibility
   };
 }
 
 const App: React.FC = () => {
   const headlessModule = new OtplessHeadlessModule();
-  const [authMethod, setAuthMethod] = useState<string | null>(null); // phone, email, or oauth channel (GMAIL, WHATSAPP, APPLE)
+  const [authMethod, setAuthMethod] = useState<string | null>(null);
   const [phoneNumber, setPhoneNumber] = useState<string>('');
   const [countryCode, setCountryCode] = useState<string>('+91');
   const [email, setEmail] = useState<string>('');
   const [otp, setOtp] = useState<string>('');
   const [isOtpSent, setIsOtpSent] = useState<boolean>(false);
 
-  // Initialize OTPLESS SDK and set up cleanup
   useEffect(() => {
+    // Initialize SDK with your App ID
     headlessModule.initialize('9DRP3BQPAKLIZYTVT2JS');
     headlessModule.setResponseCallback(onHeadlessResult);
     return () => {
@@ -50,9 +53,10 @@ const App: React.FC = () => {
       return;
     }
     const request = {
-      phone: phoneNumber,
-      countryCode,
+      phone: phoneNumber.replace(/\D/g, ''), // Remove non-digits
+      countryCode: countryCode.startsWith('+') ? countryCode : `+${countryCode}`,
     };
+    console.log('Phone Auth Request:', JSON.stringify(request));
     headlessModule.start(request);
   };
 
@@ -63,14 +67,16 @@ const App: React.FC = () => {
       return;
     }
     const request = {
-      email,
+      email: email.trim().toLowerCase(),
     };
+    console.log('Email Auth Request:', JSON.stringify(request));
     headlessModule.start(request);
   };
 
   // Start OAuth authentication
   const startOAuth = (channel: string) => {
     const request = { channelType: channel };
+    console.log('OAuth Request:', JSON.stringify(request));
     headlessModule.start(request);
   };
 
@@ -83,29 +89,31 @@ const App: React.FC = () => {
     const request =
       authMethod === 'phone'
         ? {
-            phone: phoneNumber,
-            countryCode,
+            phone: phoneNumber.replace(/\D/g, ''),
+            countryCode: countryCode.startsWith('+') ? countryCode : `+${countryCode}`,
             otp,
           }
         : {
-            email,
+            email: email.trim().toLowerCase(),
             otp,
           };
-    headlessModule.start(request);
+    console.log('Verification Request:', JSON.stringify(request));
+    headlessModule.start(request); // Use start for OTP verification
   };
 
   // Handle headless SDK responses
   const onHeadlessResult = (result: OtplessResponse) => {
     headlessModule.commitResponse(result);
     const responseType = result.responseType;
+    console.log(`Response Type: ${responseType}, Full Response:`, JSON.stringify(result));
 
     switch (responseType) {
       case 'SDK_READY':
-        console.log('SDK is ready');
+        console.log('SDK is ready with App ID: 9DRP3BQPAKLIZYTVT2JS');
         break;
       case 'FAILED':
-        console.log('SDK initialization failed');
-        Alert.alert('Error', 'SDK initialization failed');
+        console.error('SDK initialization failed:', result.response.errorMessage);
+        Alert.alert('Error', `SDK initialization failed: ${result.response.errorMessage || 'Unknown error'}`);
         break;
       case 'INITIATE':
         if (result.statusCode === 200) {
@@ -121,10 +129,7 @@ const App: React.FC = () => {
             Alert.alert('Info', `Initiated ${authType} authentication`);
           }
         } else {
-          const errorMessage =
-            Platform.OS === 'ios'
-              ? handleInitiateErrorIOS(result.response)
-              : handleInitiateErrorAndroid(result.response);
+          const errorMessage = handleInitiateError(result.response);
           Alert.alert('Error', errorMessage || 'Failed to initiate authentication');
         }
         break;
@@ -143,12 +148,12 @@ const App: React.FC = () => {
             console.log(`Token: ${token}`);
             Alert.alert('Success', `Login successful! Token: ${token}`);
             resetForm();
+          } else {
+            console.error('Token missing in VERIFY response');
+            Alert.alert('Error', 'Verification succeeded, but no token was returned');
           }
         } else {
-          const errorMessage =
-            Platform.OS === 'ios'
-              ? handleVerifyErrorIOS(result.response)
-              : handleVerifyErrorAndroid(result.response);
+          const errorMessage = handleVerifyError(result.response);
           Alert.alert('Error', errorMessage || 'OTP verification failed');
         }
         break;
@@ -158,11 +163,18 @@ const App: React.FC = () => {
         console.log(`Delivery Status: ${authType} via ${deliveryChannel}`);
         break;
       case 'ONETAP':
-        const token = result.response.token;
+        console.log('ONETAP Response Details:', JSON.stringify(result.response));
+        const token = result.response.token || result.response.idToken || result.response.data?.token;
         if (token) {
           console.log(`OneTap Token: ${token}`);
           Alert.alert('Success', `Login successful! Token: ${token}`);
           resetForm();
+        } else {
+          console.error('Token missing in ONETAP response. Full response:', JSON.stringify(result));
+          Alert.alert(
+            'Error',
+            'OneTap authentication succeeded, but no token was returned. Check logs for details.'
+          );
         }
         break;
       case 'FALLBACK_TRIGGERED':
@@ -187,28 +199,54 @@ const App: React.FC = () => {
     setAuthMethod(null);
   };
 
-  // Error handling for Android
-  const handleInitiateErrorAndroid = (response: { errorMessage?: string }): string => {
-    return response.errorMessage || 'Initiation error';
+  // Error handling for initiation
+  const handleInitiateError = (response: { errorCode?: string; errorMessage?: string }): string => {
+    const errorCode = response?.errorCode;
+    const errorMessage = response?.errorMessage || 'Initiation error';
+    switch (errorCode) {
+      case '1001':
+      case '1002':
+        return 'Too many requests. Please try again later';
+      case '1003':
+        return 'Invalid App ID or unauthorized request';
+      case '4000':
+        return 'Invalid phone number or email format';
+      case '9100':
+      case '9103':
+      case '9104':
+        return 'Network error. Please check your connection';
+      default:
+        return errorMessage;
+    }
   };
 
-  const handleVerifyErrorAndroid = (response: { errorMessage?: string }): string => {
-    return response.errorMessage || 'Verification error';
-  };
-
-  // Error handling for iOS
-  const handleInitiateErrorIOS = (response: { errorMessage?: string }): string => {
-    return response.errorMessage || 'Initiation error';
-  };
-
-  const handleVerifyErrorIOS = (response: { errorMessage?: string }): string => {
-    return response.errorMessage || 'Verification error';
+  // Error handling for verification
+  const handleVerifyError = (response: { errorCode?: string; errorMessage?: string }): string => {
+    const errorCode = response?.errorCode;
+    const errorMessage = response?.errorMessage || 'Verification error';
+    switch (errorCode) {
+      case '7112':
+        return 'Empty OTP provided';
+      case '7115':
+        return 'OTP is already verified';
+      case '7118':
+        return 'Incorrect OTP';
+      case '7303':
+        return 'OTP has expired';
+      case '4000':
+        return 'Invalid request parameters';
+      case '9100':
+      case '9103':
+      case '9104':
+        return 'Network error. Please check your connection';
+      default:
+        return errorMessage;
+    }
   };
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>UrbanBook Login</Text>
-
       {!authMethod && (
         <>
           <TouchableOpacity
@@ -252,7 +290,6 @@ const App: React.FC = () => {
           </TouchableOpacity>
         </>
       )}
-
       {authMethod === 'phone' && !isOtpSent && (
         <>
           <TextInput
@@ -273,7 +310,6 @@ const App: React.FC = () => {
           <Button title="Back" onPress={resetForm} color="gray" />
         </>
       )}
-
       {authMethod === 'email' && !isOtpSent && (
         <>
           <TextInput
@@ -288,7 +324,6 @@ const App: React.FC = () => {
           <Button title="Back" onPress={resetForm} color="gray" />
         </>
       )}
-
       {isOtpSent && (authMethod === 'phone' || authMethod === 'email') && (
         <>
           <TextInput
